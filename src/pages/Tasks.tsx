@@ -11,7 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { PlusCircle, Search, Trash2, Calendar } from 'lucide-react';
+import { PlusCircle, Search, Trash2, Calendar, ShieldCheck, User } from 'lucide-react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
@@ -25,10 +25,14 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 
+// ─── Schemas ────────────────────────────────────────────────────────────────
+
 const taskSchema = z.object({
   title: z.string().min(3, { message: 'Title must be at least 3 characters' }),
   category: z.string().optional(),
   description: z.string().optional(),
+  /** For admin: the intern this task is assigned to */
+  target_intern_id: z.string().optional(),
 });
 type TaskFormValues = z.infer<typeof taskSchema>;
 
@@ -36,6 +40,38 @@ const reviewSchema = z.object({
   approval_status: z.enum(['Approved', 'Rejected']),
 });
 type ReviewFormValues = z.infer<typeof reviewSchema>;
+
+// ─── Intern profile used for the admin intern-selector ───────────────────────
+interface InternProfile {
+  id: string;
+  name: string;
+}
+
+// ─── Creator badge helper ────────────────────────────────────────────────────
+function CreatorBadge({ role }: { role?: 'ADMIN' | 'INTERN' | string }) {
+  if (role === 'ADMIN') {
+    return (
+      <Badge
+        variant="outline"
+        className="text-[10px] gap-1 border-purple-500/40 text-purple-500 bg-purple-500/10"
+      >
+        <ShieldCheck className="w-3 h-3" />
+        Admin Created
+      </Badge>
+    );
+  }
+  return (
+    <Badge
+      variant="outline"
+      className="text-[10px] gap-1 border-sky-500/40 text-sky-500 bg-sky-500/10"
+    >
+      <User className="w-3 h-3" />
+      Student Created
+    </Badge>
+  );
+}
+
+// ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function Tasks() {
   const { user } = useAuth();
@@ -45,6 +81,10 @@ export default function Tasks() {
   const [loading, setLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [reviewTask, setReviewTask] = useState<Task | null>(null);
+  /** List of interns, fetched when admin opens the dialog */
+  const [interns, setInterns] = useState<InternProfile[]>([]);
+
+  const isAdmin = user?.role === 'ADMIN';
 
   const form = useForm<TaskFormValues>({
     resolver: zodResolver(taskSchema),
@@ -52,6 +92,7 @@ export default function Tasks() {
       title: '',
       category: '',
       description: '',
+      target_intern_id: '',
     },
   });
 
@@ -74,10 +115,23 @@ export default function Tasks() {
     fetchTasks();
   }, [user]);
 
+  // Fetch intern list when admin dialog opens
+  useEffect(() => {
+    if (isAdmin && isDialogOpen && interns.length === 0) {
+      supabase
+        .from('profiles')
+        .select('id, name')
+        .eq('role', 'INTERN')
+        .then(({ data }) => {
+          if (data) setInterns(data as InternProfile[]);
+        });
+    }
+  }, [isAdmin, isDialogOpen]);
+
   const fetchTasks = async () => {
     try {
       let query = supabase.from('tasks').select('*').order('created_at', { ascending: false });
-      
+
       if (user?.role === 'INTERN') {
         query = query.eq('intern_id', user.id);
       }
@@ -96,9 +150,17 @@ export default function Tasks() {
   const onSubmit = async (values: TaskFormValues) => {
     if (!user) return;
 
+    // Admins must select an intern to assign the task to
+    if (isAdmin && !values.target_intern_id) {
+      form.setError('target_intern_id', { message: 'Please select an intern' });
+      return;
+    }
+
     try {
+      const assignedInternId = isAdmin ? values.target_intern_id! : user.id;
+
       const newTask = {
-        intern_id: user.id,
+        intern_id: assignedInternId,
         title: values.title,
         category: values.category || 'Development',
         description: values.description || null,
@@ -107,12 +169,14 @@ export default function Tasks() {
         actual_time: 0,
         status: 'Not Started',
         progress: 0,
-        approval_status: 'Not Submitted'
+        approval_status: 'Not Submitted',
+        created_by: user.id,
+        created_by_role: user.role as 'ADMIN' | 'INTERN',
       };
 
       const { error } = await supabase.from('tasks').insert([newTask]);
       if (error) throw error;
-      
+
       form.reset();
       setIsDialogOpen(false);
       fetchTasks();
@@ -123,10 +187,10 @@ export default function Tasks() {
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (task: Task) => {
     if (!confirm('Are you sure you want to delete this task?')) return;
     try {
-      const { error } = await supabase.from('tasks').delete().eq('id', id);
+      const { error } = await supabase.from('tasks').delete().eq('id', task.id);
       if (error) throw error;
       fetchTasks();
       toast.success('Task deleted');
@@ -165,7 +229,6 @@ export default function Tasks() {
         .from('tasks')
         .update({
           approval_status: values.approval_status,
-          // If rejected, optionally change task status back to In Progress so they can fix it
           status: values.approval_status === 'Rejected' ? 'In Progress' : reviewTask.status,
         })
         .eq('id', reviewTask.id);
@@ -181,19 +244,19 @@ export default function Tasks() {
     }
   };
 
+  // A user can delete a task if they are the intern who owns it OR an admin
+  const canDelete = (task: Task) =>
+    (user?.role === 'INTERN' && task.intern_id === user.id) || isAdmin;
+
   const filteredTasks = tasks.filter(t => {
     const matchesSearch = t.title.toLowerCase().includes(searchTerm.toLowerCase());
-    
+
     if (!selectedDate) return matchesSearch;
 
     const createdStr = new Date(t.created_at).toISOString().split('T')[0];
     const completedStr = t.completed_at ? new Date(t.completed_at).toISOString().split('T')[0] : null;
-    
-    // Condition 1: Task was created on or before the selected date
+
     const createdOnOrBefore = createdStr <= selectedDate;
-    
-    // Condition 2: Task is not completed yet OR it was completed ON OR AFTER the selected date
-    // (If it was completed BEFORE the selected date, it should drop off)
     const notCompletedOrCompletedLater = !completedStr || completedStr >= selectedDate;
 
     return matchesSearch && createdOnOrBefore && notCompletedOrCompletedLater;
@@ -218,20 +281,125 @@ export default function Tasks() {
     }
   };
 
+  // ─── New Task Dialog (shared between intern & admin) ────────────────────────
+  const newTaskDialog = (
+    <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+      <DialogTrigger asChild>
+        <Button className="gap-2">
+          <PlusCircle className="w-4 h-4" />
+          New Task
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-[440px]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            {isAdmin && <ShieldCheck className="w-4 h-4 text-purple-500" />}
+            {isAdmin ? 'Create Task for Intern' : 'Create Task'}
+          </DialogTitle>
+          <DialogDescription>
+            {isAdmin
+              ? 'Assign a new task to a specific intern. It will be marked as Admin Created.'
+              : 'Add a new task to your tracking board.'}
+          </DialogDescription>
+        </DialogHeader>
+
+        <Form {...form}>
+          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4 py-4">
+
+            {/* Admin: intern selector */}
+            {isAdmin && (
+              <FormField
+                control={form.control}
+                name="target_intern_id"
+                render={({ field }: { field: any }) => (
+                  <FormItem>
+                    <FormLabel>Assign To Intern</FormLabel>
+                    <Select onValueChange={field.onChange} value={field.value}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select an intern..." />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        {interns.map(intern => (
+                          <SelectItem key={intern.id} value={intern.id}>
+                            {intern.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            )}
+
+            <FormField
+              control={form.control}
+              name="title"
+              render={({ field }: { field: any }) => (
+                <FormItem>
+                  <FormLabel>Title</FormLabel>
+                  <FormControl>
+                    <Input placeholder="Task name..." {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="category"
+              render={({ field }: { field: any }) => (
+                <FormItem>
+                  <FormLabel>Category</FormLabel>
+                  <FormControl>
+                    <Input placeholder="Learning, Implementation..." {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="description"
+              render={({ field }: { field: any }) => (
+                <FormItem>
+                  <FormLabel>Description</FormLabel>
+                  <FormControl>
+                    <Textarea placeholder="Details of the task..." className="h-20" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <div className="flex justify-end pt-4">
+              <Button type="submit">Save Task</Button>
+            </div>
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  );
+
+  // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-6 animate-in fade-in duration-500 pb-10">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-foreground">Tasks</h1>
-          <p className="text-muted-foreground mt-1">Manage your assigned work and deliverables.</p>
+          <p className="text-muted-foreground mt-1">
+            {isAdmin ? 'Manage all intern tasks and create new assignments.' : 'Manage your assigned work and deliverables.'}
+          </p>
         </div>
 
         <div className="flex items-center space-x-2 w-full sm:w-auto">
           <span className="text-sm text-muted-foreground whitespace-nowrap"><Calendar className="w-4 h-4 inline mr-1" />Date:</span>
-          <Input 
-            type="date" 
-            value={selectedDate} 
-            onChange={(e) => setSelectedDate(e.target.value)} 
+          <Input
+            type="date"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value)}
             className="w-auto h-9"
           />
           {selectedDate && (
@@ -241,71 +409,8 @@ export default function Tasks() {
           )}
         </div>
 
-        {user?.role === 'INTERN' && (
-          <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-            <DialogTrigger asChild>
-              <Button className="gap-2">
-                <PlusCircle className="w-4 h-4" />
-                New Task
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="sm:max-w-[425px]">
-              <DialogHeader>
-                <DialogTitle>Create Task</DialogTitle>
-                <DialogDescription>
-                  Add a new task to your tracking board.
-                </DialogDescription>
-              </DialogHeader>
-              
-              <Form {...form}>
-                <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4 py-4">
-                  <FormField
-                    control={form.control}
-                    name="title"
-                    render={({ field }: { field: any }) => (
-                      <FormItem>
-                        <FormLabel>Title</FormLabel>
-                        <FormControl>
-                          <Input placeholder="Task name..." {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <FormField
-                    control={form.control}
-                    name="category"
-                    render={({ field }: { field: any }) => (
-                      <FormItem>
-                        <FormLabel>Category</FormLabel>
-                        <FormControl>
-                          <Input placeholder="Learning, Implementation..." {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <FormField
-                    control={form.control}
-                    name="description"
-                    render={({ field }: { field: any }) => (
-                      <FormItem>
-                        <FormLabel>Description</FormLabel>
-                        <FormControl>
-                          <Textarea placeholder="Details of the task..." className="h-20" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <div className="flex justify-end pt-4">
-                    <Button type="submit">Save Task</Button>
-                  </div>
-                </form>
-              </Form>
-            </DialogContent>
-          </Dialog>
-        )}
+        {/* Both INTERN and ADMIN can open the New Task dialog */}
+        {newTaskDialog}
       </div>
 
       <Card>
@@ -330,13 +435,15 @@ export default function Tasks() {
               <TabsTrigger value="list">List View</TabsTrigger>
               <TabsTrigger value="board">Board View</TabsTrigger>
             </TabsList>
-            
+
+            {/* ── List View ─────────────────────────────────────────── */}
             <TabsContent value="list">
               <div className="rounded-md border border-border">
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Task Title</TableHead>
+                      <TableHead>Creator</TableHead>
                       <TableHead>Desc</TableHead>
                       <TableHead>Category</TableHead>
                       <TableHead>Status</TableHead>
@@ -348,11 +455,11 @@ export default function Tasks() {
                   <TableBody>
                     {loading ? (
                       <TableRow>
-                        <TableCell colSpan={6} className="text-center py-8">Loading tasks...</TableCell>
+                        <TableCell colSpan={8} className="text-center py-8">Loading tasks...</TableCell>
                       </TableRow>
                     ) : filteredTasks.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                        <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
                           No tasks found.
                         </TableCell>
                       </TableRow>
@@ -360,6 +467,13 @@ export default function Tasks() {
                       filteredTasks.map(task => (
                         <TableRow key={task.id}>
                           <TableCell className="font-medium">{task.title}</TableCell>
+
+                          {/* Creator badge */}
+                          <TableCell>
+                            <CreatorBadge role={task.created_by_role} />
+                          </TableCell>
+
+                          {/* Description */}
                           <TableCell>
                             {task.description ? (
                               <Dialog>
@@ -378,10 +492,13 @@ export default function Tasks() {
                               <span className="text-xs text-muted-foreground opacity-50 ml-2">-</span>
                             )}
                           </TableCell>
+
                           <TableCell>
                             <Badge variant="outline">{task.category}</Badge>
                           </TableCell>
                           <TableCell>{getStatusBadge(task.status)}</TableCell>
+
+                          {/* Done checkbox — only interns can check off their own tasks */}
                           <TableCell>
                             <div className="flex items-center gap-2">
                               {user?.role === 'INTERN' ? (
@@ -396,17 +513,20 @@ export default function Tasks() {
                               )}
                             </div>
                           </TableCell>
+
                           <TableCell>{getApprovalBadge(task.approval_status)}</TableCell>
+
+                          {/* Actions */}
                           <TableCell className="text-right space-x-2">
-                            {user?.role === 'INTERN' && (
-                              <Button variant="ghost" size="icon" onClick={() => handleDelete(task.id)}>
+                            {canDelete(task) && (
+                              <Button variant="ghost" size="icon" onClick={() => handleDelete(task)}>
                                 <Trash2 className="w-4 h-4 text-destructive" />
                               </Button>
                             )}
-                            {user?.role === 'ADMIN' && (
-                              <Button 
-                                variant={task.approval_status === 'Pending Review' ? 'default' : 'outline'} 
-                                size="sm" 
+                            {isAdmin && (
+                              <Button
+                                variant={task.approval_status === 'Pending Review' ? 'default' : 'outline'}
+                                size="sm"
                                 onClick={() => setReviewTask(task)}
                               >
                                 Review
@@ -421,9 +541,9 @@ export default function Tasks() {
               </div>
             </TabsContent>
 
+            {/* ── Board View ────────────────────────────────────────── */}
             <TabsContent value="board">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                {/* Simplified board view columns */}
                 {['Not Started', 'In Progress', 'Completed'].map(columnStatus => (
                   <div key={columnStatus} className="bg-secondary/30 rounded-xl p-4 border border-border min-h-[400px]">
                     <h3 className="font-semibold text-sm mb-4 flex justify-between items-center text-foreground">
@@ -441,16 +561,22 @@ export default function Tasks() {
                               {getApprovalBadge(task.approval_status)}
                             </div>
                             <h4 className="font-medium text-sm mb-2 leading-tight">{task.title}</h4>
+
+                            {/* Creator badge in board card */}
+                            <div className="mb-2">
+                              <CreatorBadge role={task.created_by_role} />
+                            </div>
+
                             <div className="flex justify-between items-center text-xs text-muted-foreground mt-2">
                               <span>Est: {task.estimated_time}h</span>
                               <span>{task.progress}%</span>
                             </div>
-                            {user?.role === 'ADMIN' && task.approval_status === 'Pending Review' && (
+                            {isAdmin && task.approval_status === 'Pending Review' && (
                               <div className="mt-3">
-                                <Button 
-                                  variant="default" 
-                                  size="sm" 
-                                  className="w-full h-7 text-xs" 
+                                <Button
+                                  variant="default"
+                                  size="sm"
+                                  className="w-full h-7 text-xs"
                                   onClick={() => setReviewTask(task)}
                                 >
                                   Review
@@ -469,7 +595,7 @@ export default function Tasks() {
         </CardContent>
       </Card>
 
-      {/* Review Modal for Admin */}
+      {/* ── Review Modal (Admin only) ────────────────────────────────────── */}
       <Dialog open={!!reviewTask} onOpenChange={(open) => !open && setReviewTask(null)}>
         <DialogContent className="sm:max-w-[425px]">
           <DialogHeader>
@@ -478,7 +604,7 @@ export default function Tasks() {
               Evaluate the task completion and approve or reject it.
             </DialogDescription>
           </DialogHeader>
-          
+
           <Form {...reviewForm}>
             <form onSubmit={reviewForm.handleSubmit(onReviewSubmit)} className="space-y-4 py-4">
               <FormField

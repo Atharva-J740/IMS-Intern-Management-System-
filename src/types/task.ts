@@ -13,6 +13,10 @@ export interface Task {
   completed_at?: string;
   approval_status: 'Not Submitted' | 'Pending Review' | 'Approved' | 'Rejected';
   created_at: string;
+  /** ID of the user who created this task (intern or admin) */
+  created_by?: string;
+  /** Role of the creator — used to display the (Admin Created) / (Student Created) badge */
+  created_by_role?: 'ADMIN' | 'INTERN';
 }
 
 export interface ProgressLog {

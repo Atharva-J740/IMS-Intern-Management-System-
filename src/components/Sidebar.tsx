@@ -91,12 +91,6 @@ export const Sidebar = () => {
         })}
       </nav>
 
-      <div className="p-4 border-t border-border">
-        <div className="bg-muted p-4 rounded-lg flex flex-col gap-1 items-center justify-center text-center">
-          <p className="text-xs text-muted-foreground font-medium">Internship Day</p>
-          <p className="text-2xl font-bold text-foreground">Day 14</p>
-        </div>
-      </div>
     </aside>
   );
 };
